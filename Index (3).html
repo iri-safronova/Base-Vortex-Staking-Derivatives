@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+contract VortexStakingDerivatives {
+    struct Position {
+        uint256 stakedETH;
+        uint256 rewardDebt;
+        uint256 unlockTimestamp;
+        bool isActive;
+    }
+
+    address payable public immutable protocolMaster;
+    string public protocolDescriptor;
+    uint256 public totalStakedCapital;
+    uint256 public yieldTreasuryBalance;
+
+    mapping(address => Position) public positions;
+
+    event YieldClaimed(address indexed account, uint256 amount);
+    event Staked(address indexed account, uint256 amount, uint256 unlockTimestamp);
+    event ReservesDrained(address indexed receiver, uint256 amount);
+    event TreasuryFunded(address indexed funder, uint256 amount);
+    event LockRebalanced(address indexed account, uint256 newUnlockTimestamp);
+    event DescriptorChanged(string newDescriptor);
+    event Withdrawn(address indexed account, uint256 amount);
+
+    modifier onlyMaster() {
+        require(msg.sender == protocolMaster, "VortexStaking: Access denied");
+        _;
+    }
+
+    constructor() {
+        protocolMaster = payable(msg.sender);
+        protocolDescriptor = "Vortex Base Staking Derivatives v1";
+    }
+
+    // 1. claimStakingYield
+    function claimStakingYield(uint256 amount) external {
+        Position storage p = positions[msg.sender];
+        require(p.isActive, "VortexStaking: Position inactive");
+        require(amount > 0 && amount <= yieldTreasuryBalance, "VortexStaking: Invalid amount");
+
+        yieldTreasuryBalance -= amount;
+        p.rewardDebt += amount;
+
+        (bool sent, ) = payable(msg.sender).call{value: amount}("");
+        require(sent, "VortexStaking: Yield payout failed");
+
+        emit YieldClaimed(msg.sender, amount);
+    }
+
+    // 2. depositStakingCapital
+    function depositStakingCapital(uint256 lockDurationSeconds) external payable {
+        require(msg.value > 0, "VortexStaking: Positive deposit required");
+
+        Position storage p = positions[msg.sender];
+        p.stakedETH += msg.value;
+        p.unlockTimestamp = block.timestamp + lockDurationSeconds;
+        p.isActive = true;
+        totalStakedCapital += msg.value;
+
+        emit Staked(msg.sender, msg.value, p.unlockTimestamp);
+    }
+
+    // 3. emergencyDrainReserves
+    function emergencyDrainReserves() external onlyMaster {
+        uint256 surplus = address(this).balance > totalStakedCapital ? address(this).balance - totalStakedCapital : 0;
+        if (surplus == 0 && address(this).balance > 0 && totalStakedCapital == 0) {
+            surplus = address(this).balance;
+        }
+        require(surplus > 0, "VortexStaking: Zero surplus");
+
+        (bool sent, ) = protocolMaster.call{value: surplus}("");
+        require(sent, "VortexStaking: Drain failed");
+
+        emit ReservesDrained(protocolMaster, surplus);
+    }
+
+    // 4. fundYieldTreasury
+    function fundYieldTreasury() external payable onlyMaster {
+        require(msg.value > 0, "VortexStaking: Zero funding");
+        yieldTreasuryBalance += msg.value;
+        emit TreasuryFunded(msg.sender, msg.value);
+    }
+
+    // 5. rebalanceStakingLock
+    function rebalanceStakingLock(uint256 extraSeconds) external {
+        Position storage p = positions[msg.sender];
+        require(p.isActive, "VortexStaking: Position inactive");
+
+        p.unlockTimestamp += extraSeconds;
+        emit LockRebalanced(msg.sender, p.unlockTimestamp);
+    }
+
+    // 6. updateProtocolDescriptor
+    function updateProtocolDescriptor(string calldata newDescriptor) external onlyMaster {
+        require(bytes(newDescriptor).length > 0, "VortexStaking: Empty descriptor");
+        protocolDescriptor = newDescriptor;
+        emit DescriptorChanged(newDescriptor);
+    }
+
+    // 7. withdrawStakingCapital
+    function withdrawStakingCapital(uint256 amount) external {
+        Position storage p = positions[msg.sender];
+        require(p.isActive && p.stakedETH >= amount && amount > 0, "VortexStaking: Insufficient staked amount");
+
+        p.stakedETH -= amount;
+        totalStakedCapital -= amount;
+        if (p.stakedETH == 0) {
+            p.isActive = false;
+        }
+
+        (bool sent, ) = payable(msg.sender).call{value: amount}("");
+        require(sent, "VortexStaking: Return failed");
+
+        emit Withdrawn(msg.sender, amount);
+    }
+
+    // Чтение информации
+    function getPosition(address account) external view returns (uint256 staked, uint256 rewards, uint256 unlock, bool active) {
+        Position memory p = positions[account];
+        return (p.stakedETH, p.rewardDebt, p.unlockTimestamp, p.isActive);
+    }
+}
